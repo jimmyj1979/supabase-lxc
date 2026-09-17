@@ -102,8 +102,20 @@ UNPRIV=$DEFAULT_UNPRIVILEGED; [[ "${a,,}" == "n" ]] && UNPRIV=0
 # ---------------------------------------------------------------- template ---
 info "Checking for a Debian template"
 pveam update >/dev/null 2>&1 || true
-TEMPLATE=$(pveam available --section system | awk '{print $2}' | grep -E '^debian-1[23]-standard' | sort -V | tail -1)
-[ -n "$TEMPLATE" ] || die "No Debian standard template available from pveam."
+
+# pct create refuses a guest OS newer than the host's lxc-pve knows about:
+# PVE 8 dies with "unsupported debian version '13.6'" on a trixie template.
+# Debian 13 needs PVE 9, so cap the candidates by the host's major version.
+PVE_VER=$(pveversion | cut -d/ -f2)   # e.g. 8.4.0
+PVE_MAJOR=${PVE_VER%%.*}
+if [ "${PVE_MAJOR:-8}" -ge 9 ]; then
+  TEMPLATE_RE='^debian-1[23]-standard'
+else
+  TEMPLATE_RE='^debian-12-standard'
+fi
+
+TEMPLATE=$(pveam available --section system | awk '{print $2}' | grep -E "$TEMPLATE_RE" | sort -V | tail -1)
+[ -n "$TEMPLATE" ] || die "No Debian standard template matching $TEMPLATE_RE available from pveam."
 
 TPL_STORAGE=$(pvesm status -content vztmpl | awk 'NR==2 {print $1}')
 if ! pveam list "$TPL_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
