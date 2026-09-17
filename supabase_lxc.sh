@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# supabase-lxc.sh — deploy self-hosted Supabase into a Debian LXC on Proxmox VE
+# supabase_lxc.sh — deploy self-hosted Supabase into a Debian LXC on Proxmox VE
 #
 # Run on the Proxmox host (not inside a guest):
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/<you>/<repo>/main/supabase-lxc.sh)"
+#   bash -c "$(curl -fsSL http://192.168.0.94:3000/jimmyj1979/supabase-lxc/raw/branch/main/supabase_lxc.sh)"
 #
 # Update an existing deployment (snapshots first):
-#   bash supabase-lxc.sh update <CTID>
+#   bash supabase_lxc.sh update <CTID>
 #
 # The container runs upstream's stock docker/ directory, so update.sh, run.sh
 # and the override system behave exactly as documented by Supabase.
@@ -15,6 +15,7 @@ set -euo pipefail
 
 # ---------------------------------------------------------------- defaults ---
 APP="Supabase"
+SCRIPT_NAME="supabase_lxc.sh"   # $0 is just "bash" when run via bash -c "$(curl ...)"
 DEFAULT_HOSTNAME="supabase"
 DEFAULT_CORES=4
 DEFAULT_RAM=8192          # MB — 4096 is the documented minimum
@@ -59,7 +60,7 @@ do_update() {
   exit 0
 }
 
-[ "${1:-}" = "update" ] && { [ -n "${2:-}" ] || die "Usage: $0 update <CTID>"; do_update "$2"; }
+[ "${1:-}" = "update" ] && { [ -n "${2:-}" ] || die "Usage: $SCRIPT_NAME update <CTID>"; do_update "$2"; }
 
 require_host
 
@@ -194,7 +195,7 @@ echo
 echo "  Credentials:  pct exec $CTID -- supabase secrets"
 echo "  Logs:         pct exec $CTID -- supabase logs [service]"
 echo "  Restart:      pct exec $CTID -- supabase restart [service]"
-echo "  Update:       bash $0 update $CTID"
+echo "  Update:       bash $SCRIPT_NAME update $CTID"
 echo
 warn "Studio is behind HTTP basic auth and the stack is plain HTTP."
 warn "Put it behind your Cloudflare tunnel or add the Caddy overlay before exposing it."
