@@ -23,6 +23,7 @@ DEFAULT_DISK=60           # GB — 40 minimum, more if Storage holds real files
 DEFAULT_SWAP=512
 DEFAULT_BRIDGE="vmbr0"
 DEFAULT_UNPRIVILEGED=1
+DEFAULT_IP="dhcp"         # or a CIDR address, e.g. 192.168.0.210/24
 PROJECT_DIR="/opt/supabase-project"
 
 # ------------------------------------------------------------------ output ---
@@ -79,6 +80,24 @@ read -rp "RAM in MB [$DEFAULT_RAM]: " RAM; RAM=${RAM:-$DEFAULT_RAM}
 read -rp "Disk in GB [$DEFAULT_DISK]: " DISK; DISK=${DISK:-$DEFAULT_DISK}
 read -rp "Bridge [$DEFAULT_BRIDGE]: " BRIDGE; BRIDGE=${BRIDGE:-$DEFAULT_BRIDGE}
 
+# A DHCP lease gets baked into SUPABASE_PUBLIC_URL/API_EXTERNAL_URL/SITE_URL
+# below, so a later lease change silently breaks Studio and auth. Prefer static.
+read -rp "IP as CIDR (e.g. 192.168.0.210/24) or 'dhcp' [$DEFAULT_IP]: " IPADDR
+IPADDR=${IPADDR:-$DEFAULT_IP}
+if [ "$IPADDR" = "dhcp" ]; then
+  NET0="name=eth0,bridge=$BRIDGE,ip=dhcp"
+  warn "Using DHCP — the lease address is written into .env and is not re-checked."
+else
+  case "$IPADDR" in
+    */*) : ;;
+    *) die "IP must include a prefix length, e.g. $IPADDR/24" ;;
+  esac
+  DEFAULT_GW=$(ip route show default | awk '{print $3}' | head -1)
+  read -rp "Gateway [$DEFAULT_GW]: " GW; GW=${GW:-$DEFAULT_GW}
+  [ -n "$GW" ] || die "No gateway given and none could be detected."
+  NET0="name=eth0,bridge=$BRIDGE,ip=$IPADDR,gw=$GW"
+fi
+
 echo
 info "Container storage options:"
 pvesm status -content rootdir | awk 'NR>1 {printf "    %-16s %-10s %s free\n", $1, $2, $6}'
@@ -132,12 +151,23 @@ pct create "$CTID" "$TPL_STORAGE:vztmpl/$TEMPLATE" \
   --memory "$RAM" \
   --swap "$DEFAULT_SWAP" \
   --rootfs "$STORAGE:$DISK" \
-  --net0 "name=eth0,bridge=$BRIDGE,ip=dhcp" \
+  --net0 "$NET0" \
   --unprivileged "$UNPRIV" \
   --features nesting=1,keyctl=1 \
   --onboot 1 \
   --tags "supabase,database" \
   --description "Supabase self-hosted — $PROJECT_DIR — manage with: supabase start|stop|logs"
+
+# runc >= 1.3.6 sets net.ipv4.ip_unprivileged_port_start during container init
+# and reopens the sysctl via /proc/self/fd/N. The LXC AppArmor profile denies
+# that reopen, so every `docker run` dies with:
+#   error during container init: open sysctl net.ipv4.ip_unprivileged_port_start
+#   file: reopen fd 8: permission denied
+# Containers built on runc <= 1.3.0 never hit it. The unprivileged user
+# namespace — the real isolation boundary — is unaffected; this only drops
+# AppArmor's secondary confinement, which docker-in-LXC commonly requires.
+info "Allowing Docker's runtime to init (AppArmor unconfined)"
+echo "lxc.apparmor.profile: unconfined" >> "/etc/pve/lxc/$CTID.conf"
 
 pct start "$CTID"
 ok "CT $CTID started"
