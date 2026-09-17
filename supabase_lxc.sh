@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+#
+# supabase-lxc.sh — deploy self-hosted Supabase into a Debian LXC on Proxmox VE
+#
+# Run on the Proxmox host (not inside a guest):
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/<you>/<repo>/main/supabase-lxc.sh)"
+#
+# Update an existing deployment (snapshots first):
+#   bash supabase-lxc.sh update <CTID>
+#
+# The container runs upstream's stock docker/ directory, so update.sh, run.sh
+# and the override system behave exactly as documented by Supabase.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------- defaults ---
+APP="Supabase"
+DEFAULT_HOSTNAME="supabase"
+DEFAULT_CORES=4
+DEFAULT_RAM=8192          # MB — 4096 is the documented minimum
+DEFAULT_DISK=60           # GB — 40 minimum, more if Storage holds real files
+DEFAULT_SWAP=512
+DEFAULT_BRIDGE="vmbr0"
+DEFAULT_UNPRIVILEGED=1
+PROJECT_DIR="/opt/supabase-project"
+
+# ------------------------------------------------------------------ output ---
+RED=$'\033[31m'; GRN=$'\033[32m'; YLW=$'\033[33m'; BLU=$'\033[36m'; RST=$'\033[0m'
+info()  { echo "${BLU}==>${RST} $*"; }
+ok()    { echo "${GRN} ok${RST} $*"; }
+warn()  { echo "${YLW}  !${RST} $*"; }
+die()   { echo "${RED}  x${RST} $*" >&2; exit 1; }
+
+# ------------------------------------------------------------- host checks ---
+require_host() {
+  command -v pveversion >/dev/null 2>&1 || die "This script must run on a Proxmox VE host."
+  [ "$(id -u)" -eq 0 ] || die "Run as root."
+}
+
+# ------------------------------------------------------------- update mode ---
+do_update() {
+  local ctid="$1"
+  require_host
+  pct status "$ctid" >/dev/null 2>&1 || die "CT $ctid not found."
+
+  local snap="preupdate-$(date +%Y%m%d-%H%M)"
+  info "Snapshotting CT $ctid as $snap"
+  if pct snapshot "$ctid" "$snap" --description "before supabase update.sh"; then
+    ok "Snapshot taken. Roll back with: pct rollback $ctid $snap"
+  else
+    warn "Snapshot failed (storage may not support it). Continuing without one."
+    read -rp "Proceed anyway? [y/N] " a; [[ "${a,,}" == "y" ]] || exit 1
+  fi
+
+  info "Running upstream update.sh inside the container"
+  pct exec "$ctid" -- sh -c "cd $PROJECT_DIR && sh update.sh"
+  pct exec "$ctid" -- sh -c "cd $PROJECT_DIR && sh run.sh start"
+  ok "Update complete. Review the Supabase changelog for any manual migration steps."
+  exit 0
+}
+
+[ "${1:-}" = "update" ] && { [ -n "${2:-}" ] || die "Usage: $0 update <CTID>"; do_update "$2"; }
+
+require_host
+
+# ---------------------------------------------------------------- settings ---
+echo
+echo "  ${BLU}${APP} LXC${RST} — Proxmox VE deployment"
+echo
+
+NEXTID=$(pvesh get /cluster/nextid)
+read -rp "Container ID [$NEXTID]: " CTID; CTID=${CTID:-$NEXTID}
+pct status "$CTID" >/dev/null 2>&1 && die "CT $CTID already exists."
+
+read -rp "Hostname [$DEFAULT_HOSTNAME]: " HOSTNAME; HOSTNAME=${HOSTNAME:-$DEFAULT_HOSTNAME}
+read -rp "Cores [$DEFAULT_CORES]: " CORES; CORES=${CORES:-$DEFAULT_CORES}
+read -rp "RAM in MB [$DEFAULT_RAM]: " RAM; RAM=${RAM:-$DEFAULT_RAM}
+read -rp "Disk in GB [$DEFAULT_DISK]: " DISK; DISK=${DISK:-$DEFAULT_DISK}
+read -rp "Bridge [$DEFAULT_BRIDGE]: " BRIDGE; BRIDGE=${BRIDGE:-$DEFAULT_BRIDGE}
+
+echo
+info "Container storage options:"
+pvesm status -content rootdir | awk 'NR>1 {printf "    %-16s %-10s %s free\n", $1, $2, $6}'
+DEFAULT_STORAGE=$(pvesm status -content rootdir | awk 'NR==2 {print $1}')
+read -rp "Storage for the container [$DEFAULT_STORAGE]: " STORAGE; STORAGE=${STORAGE:-$DEFAULT_STORAGE}
+
+# Docker's overlay2 driver does not work on a ZFS-backed rootfs inside LXC; it
+# falls back to vfs, which is slow and disk-hungry. Prefer LVM-thin or a dir.
+STORAGE_TYPE=$(pvesm status | awk -v s="$STORAGE" '$1==s {print $2}')
+if [ "$STORAGE_TYPE" = "zfspool" ]; then
+  warn "$STORAGE is ZFS. Docker inside an LXC on ZFS falls back to the vfs storage"
+  warn "driver — expect poor performance and heavy disk use."
+  warn "Use LVM-thin or a directory storage for the rootfs if you can."
+  read -rp "Continue with ZFS anyway? [y/N] " a; [[ "${a,,}" == "y" ]] || exit 1
+fi
+
+read -rp "Enable Logs & Analytics (Logflare + Vector, ~1-2 GB more RAM)? [y/N] " ENABLE_LOGS
+read -rp "Unprivileged container? [Y/n] " a
+UNPRIV=$DEFAULT_UNPRIVILEGED; [[ "${a,,}" == "n" ]] && UNPRIV=0
+
+# ---------------------------------------------------------------- template ---
+info "Checking for a Debian template"
+pveam update >/dev/null 2>&1 || true
+TEMPLATE=$(pveam available --section system | awk '{print $2}' | grep -E '^debian-1[23]-standard' | sort -V | tail -1)
+[ -n "$TEMPLATE" ] || die "No Debian standard template available from pveam."
+
+TPL_STORAGE=$(pvesm status -content vztmpl | awk 'NR==2 {print $1}')
+if ! pveam list "$TPL_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
+  info "Downloading $TEMPLATE to $TPL_STORAGE"
+  pveam download "$TPL_STORAGE" "$TEMPLATE"
+fi
+ok "Template: $TEMPLATE"
+
+# --------------------------------------------------------------- create ct ---
+info "Creating CT $CTID"
+pct create "$CTID" "$TPL_STORAGE:vztmpl/$TEMPLATE" \
+  --hostname "$HOSTNAME" \
+  --cores "$CORES" \
+  --memory "$RAM" \
+  --swap "$DEFAULT_SWAP" \
+  --rootfs "$STORAGE:$DISK" \
+  --net0 "name=eth0,bridge=$BRIDGE,ip=dhcp" \
+  --unprivileged "$UNPRIV" \
+  --features nesting=1,keyctl=1 \
+  --onboot 1 \
+  --tags "supabase,database" \
+  --description "Supabase self-hosted — $PROJECT_DIR — manage with: supabase start|stop|logs"
+
+pct start "$CTID"
+ok "CT $CTID started"
+
+info "Waiting for network"
+for i in $(seq 1 60); do
+  pct exec "$CTID" -- getent hosts deb.debian.org >/dev/null 2>&1 && break
+  [ "$i" -eq 60 ] && die "Container has no network after 60s."
+  sleep 1
+done
+IP=$(pct exec "$CTID" -- hostname -I | awk '{print $1}')
+ok "Container IP: $IP"
+
+# ----------------------------------------------------------- provisioning ----
+info "Installing prerequisites"
+pct exec "$CTID" -- bash -c '
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq ca-certificates curl git openssl jq >/dev/null
+'
+
+info "Installing Docker Engine"
+pct exec "$CTID" -- bash -c 'curl -fsSL https://get.docker.com | sh >/dev/null 2>&1'
+pct exec "$CTID" -- systemctl enable --now docker >/dev/null 2>&1
+pct exec "$CTID" -- docker --version
+
+info "Running upstream Supabase setup.sh (this pulls ~4 GB of images)"
+pct exec "$CTID" -- bash -c "
+  mkdir -p /opt && cd /opt
+  curl -fsSL https://supabase.link/setup.sh | sh -s -- -y
+"
+[ -n "$(pct exec "$CTID" -- ls -A "$PROJECT_DIR" 2>/dev/null)" ] || die "setup.sh did not produce $PROJECT_DIR"
+
+# setup.sh -y writes localhost URLs; point them at the container instead.
+info "Setting URLs to the container address"
+pct exec "$CTID" -- bash -c "
+  cd $PROJECT_DIR
+  sed -i 's|^SUPABASE_PUBLIC_URL=.*|SUPABASE_PUBLIC_URL=http://$IP:8000|' .env
+  sed -i 's|^API_EXTERNAL_URL=.*|API_EXTERNAL_URL=http://$IP:8000/auth/v1|' .env
+  sed -i 's|^SITE_URL=.*|SITE_URL=http://$IP:3000|' .env
+"
+
+if [[ "${ENABLE_LOGS,,}" == "y" ]]; then
+  info "Enabling the logs overlay"
+  pct exec "$CTID" -- sh -c "cd $PROJECT_DIR && sh run.sh config add logs"
+fi
+
+# Convenience wrapper so you can type `supabase logs` instead of cd-ing about.
+pct exec "$CTID" -- bash -c "cat > /usr/local/bin/supabase <<'EOF'
+#!/bin/sh
+cd $PROJECT_DIR || exit 1
+exec sh run.sh \"\$@\"
+EOF
+chmod +x /usr/local/bin/supabase"
+
+info "Starting the stack (waiting for all services to report healthy)"
+pct exec "$CTID" -- sh -c "cd $PROJECT_DIR && sh run.sh start"
+
+# ------------------------------------------------------------------ done -----
+echo
+ok "$APP is up in CT $CTID"
+echo
+echo "  Studio      http://$IP:8000"
+echo "  API base    http://$IP:8000"
+echo "  Project     $PROJECT_DIR (inside the container)"
+echo
+echo "  Credentials:  pct exec $CTID -- supabase secrets"
+echo "  Logs:         pct exec $CTID -- supabase logs [service]"
+echo "  Restart:      pct exec $CTID -- supabase restart [service]"
+echo "  Update:       bash $0 update $CTID"
+echo
+warn "Studio is behind HTTP basic auth and the stack is plain HTTP."
+warn "Put it behind your Cloudflare tunnel or add the Caddy overlay before exposing it."
+echo
