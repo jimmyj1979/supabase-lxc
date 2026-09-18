@@ -284,6 +284,27 @@ ln -sf /usr/local/bin/supabase /usr/bin/supabase"
 info "Starting the stack (waiting for all services to report healthy)"
 pct exec "$CTID" -- sh -c "cd $PROJECT_DIR && sh run.sh start"
 
+# The log cap is applied when a container is CREATED, so it is only in force if
+# the daemon had already read daemon.json by then. That ordering broke once
+# (get.docker.com starts the daemon itself, so the config landed too late and
+# every container came up unbounded) and the failure is invisible — the stack
+# looks perfectly healthy. Assert it rather than assume it.
+UNCAPPED=$(pct exec "$CTID" -- sh -c '
+  n=0
+  for c in $(docker ps --format "{{.Names}}"); do
+    docker inspect "$c" --format "{{json .HostConfig.LogConfig}}" | grep -q max-size || n=$((n+1))
+  done
+  echo "$n"' 2>/dev/null || echo "?")
+if [ "$UNCAPPED" = "0" ]; then
+  ok "Container log rotation is in force on every service."
+else
+  warn "$UNCAPPED container(s) have no log size limit — their logs will grow"
+  warn "unbounded. The Docker daemon did not pick up /etc/docker/daemon.json"
+  warn "before the stack was created. Fix with:"
+  warn "  pct exec $CTID -- systemctl restart docker"
+  warn "  pct exec $CTID -- sh -c 'cd $PROJECT_DIR && docker compose up -d --force-recreate'"
+fi
+
 # ------------------------------------------------------------------ done -----
 echo
 ok "$APP is up in CT $CTID"
