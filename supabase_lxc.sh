@@ -229,7 +229,17 @@ pct exec "$CTID" -- bash -c 'mkdir -p /etc/docker && cat > /etc/docker/daemon.js
 }
 EOF'
 
-pct exec "$CTID" -- systemctl enable --now docker >/dev/null 2>&1
+# get.docker.com starts the daemon as part of its install, so it is already
+# running by the time daemon.json lands above. `enable --now` would then be a
+# no-op and the daemon would never read the file, leaving every container
+# uncapped. Restart explicitly so the log limits are actually in force.
+pct exec "$CTID" -- systemctl enable docker >/dev/null 2>&1
+pct exec "$CTID" -- systemctl restart docker >/dev/null 2>&1
+for i in $(seq 1 30); do
+  pct exec "$CTID" -- docker info >/dev/null 2>&1 && break
+  [ "$i" -eq 30 ] && die "Docker did not come back after restart."
+  sleep 1
+done
 pct exec "$CTID" -- docker --version
 
 info "Running upstream Supabase setup.sh (this pulls ~4 GB of images)"

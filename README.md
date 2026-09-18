@@ -37,6 +37,46 @@ pct exec <CTID> -- supabase logs [svc]
 pct exec <CTID> -- supabase restart [svc]
 ```
 
+## Post-install configuration
+
+`supabase_configure.sh` configures the things the installer deliberately leaves
+alone. Run it against an existing container, as many times as you like:
+
+```sh
+bash supabase_configure.sh <CTID>
+```
+
+Every section is optional and is skipped with a plain `n`:
+
+| Section | What it sets |
+|---|---|
+| **Resend** | SMTP host/user/key, `From` address, email confirmation required, and four branded HTML templates — created, mounted and registered |
+| **Twilio** | SMS OTP on signup (Verify or Programmable Messaging) and TOTP 2FA |
+| **Storage** | Upload size limit, image transformation |
+| **Edge Functions** | `FUNCTIONS_VERIFY_JWT`, and scaffolds a new function |
+
+It backs `.env` up first, changes nothing until you confirm at the end, and
+recreates only the services that are actually affected. It finds the project
+directory itself, so it works on containers built by other helper scripts that
+use `/root/supabase-project`.
+
+Three things it handles that are easy to get wrong by hand:
+
+- **`FILE_SIZE_LIMIT` and `ENABLE_IMAGE_TRANSFORMATION` are hardcoded in
+  upstream's `docker-compose.yml`, not read from `.env`.** Setting them in
+  `.env` does nothing at all. They go in `docker-compose.override.yml` instead.
+- **Upstream sets `COMPOSE_FILE=docker-compose.yml`, which disables Compose's
+  automatic inclusion of `docker-compose.override.yml`** — so an override file
+  is written and then silently ignored. The script appends the override to
+  `COMPOSE_FILE` when needed.
+- **GoTrue reads different variables for `twilio` and `twilio_verify`.**
+  Choosing one provider while setting the other's credentials leaves it with
+  none, and nothing complains until an SMS actually fails to send.
+
+It also refuses to leave `ENABLE_PHONE_AUTOCONFIRM=true` alongside Twilio:
+autoconfirm marks a phone verified without ever sending a code, which makes the
+whole OTP flow decorative.
+
 ## Addressing — the container's IP is baked into `.env`
 
 **Use a static address unless you have a reason not to.** The installer asks for
