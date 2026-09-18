@@ -82,11 +82,16 @@ read -rp "Bridge [$DEFAULT_BRIDGE]: " BRIDGE; BRIDGE=${BRIDGE:-$DEFAULT_BRIDGE}
 
 # A DHCP lease gets baked into SUPABASE_PUBLIC_URL/API_EXTERNAL_URL/SITE_URL
 # below, so a later lease change silently breaks Studio and auth. Prefer static.
-read -rp "IP as CIDR (e.g. 192.168.1.50/24) or 'dhcp' [$DEFAULT_IP]: " IPADDR
+echo
+info "A static address is preferred: whatever the container ends up with is"
+info "written into SUPABASE_PUBLIC_URL/API_EXTERNAL_URL/SITE_URL and is never"
+info "re-checked, so a changed DHCP lease breaks Studio and auth silently."
+read -rp "Static IP as CIDR — preferred (e.g. 192.168.1.50/24) — or 'dhcp' [$DEFAULT_IP]: " IPADDR
 IPADDR=${IPADDR:-$DEFAULT_IP}
 if [ "$IPADDR" = "dhcp" ]; then
   NET0="name=eth0,bridge=$BRIDGE,ip=dhcp"
-  warn "Using DHCP — the lease address is written into .env and is not re-checked."
+  warn "Using DHCP — reserve the lease on your DHCP server, or the address"
+  warn "written into .env will eventually stop matching the container."
 else
   case "$IPADDR" in
     */*) : ;;

@@ -39,9 +39,10 @@ pct exec <CTID> -- supabase restart [svc]
 
 ## Addressing — the container's IP is baked into `.env`
 
-The installer asks for either a static CIDR address or `dhcp`. Whichever you
-choose, the address the container ends up with is written into three variables
-in `.env` and **is never re-checked afterwards**:
+**Use a static address unless you have a reason not to.** The installer asks for
+either a static CIDR address or `dhcp`; static is the safer answer, and the
+prompt says so. Whichever you choose, the address the container ends up with is
+written into three variables in `.env` and **is never re-checked afterwards**:
 
 ```
 SUPABASE_PUBLIC_URL=http://<IP>:8000
