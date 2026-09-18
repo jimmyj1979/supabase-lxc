@@ -2,8 +2,10 @@
 #
 # supabase_configure.sh — post-install configuration for a Supabase LXC
 #
-# Run on the Proxmox host (not inside the guest):
+# Run EITHER on the Proxmox host, naming the container:
 #   bash supabase_configure.sh <CTID>
+# OR inside the Supabase container itself, with no argument:
+#   bash supabase_configure.sh
 #
 # Configures, each section skippable and safe to re-run:
 #   * Resend        — SMTP for email verification, plus branded templates
@@ -28,25 +30,38 @@ ask()   { local p="$1" d="${2:-}" a; read -rp "$p${d:+ [$d]}: " a; printf '%s' "
 asks()  { local p="$1" a; read -rsp "$p: " a; echo >&2; printf '%s' "$a"; }   # silent
 yes?()  { local a; read -rp "$1 [y/N] " a; [[ "${a,,}" == "y" ]]; }
 
-# -------------------------------------------------------------------- host ---
-command -v pveversion >/dev/null 2>&1 || die "Run this on a Proxmox VE host."
+# ------------------------------------------------------------------- where ---
+# Runs either on the Proxmox host (reaching into a container with pct exec) or
+# inside the Supabase container itself. On the host a CTID is required; inside
+# the container it is neither needed nor accepted.
 [ "$(id -u)" -eq 0 ] || die "Run as root."
 
-CTID="${1:-}"
-[ -n "$CTID" ] || die "Usage: $SCRIPT_NAME <CTID>"
-pct status "$CTID" >/dev/null 2>&1 || die "CT $CTID not found."
-[ "$(pct status "$CTID")" = "status: running" ] || die "CT $CTID is not running."
+if command -v pveversion >/dev/null 2>&1; then
+  MODE=host
+  CTID="${1:-}"
+  [ -n "$CTID" ] || die "Usage (on the Proxmox host): $SCRIPT_NAME <CTID>"
+  pct status "$CTID" >/dev/null 2>&1 || die "CT $CTID not found."
+  [ "$(pct status "$CTID")" = "status: running" ] || die "CT $CTID is not running."
+  run() { pct exec "$CTID" -- "$@"; }
+else
+  MODE=container
+  CTID=""
+  command -v docker >/dev/null 2>&1 ||     die "Not a Proxmox host and no docker here — run this on the PVE host with a CTID, or inside the Supabase container."
+  [ -z "${1:-}" ] || warn "Ignoring argument '$1' — a CTID is only used on the Proxmox host."
+  run() { "$@"; }
+fi
 
 # The installer uses /opt/supabase-project; containers built by other helper
 # scripts commonly use /root/supabase-project. Find whichever is really there.
 PROJECT_DIR=""
 for d in /opt/supabase-project /root/supabase-project /opt/supabase/docker; do
-  if pct exec "$CTID" -- test -f "$d/.env" 2>/dev/null; then PROJECT_DIR="$d"; break; fi
+  if run test -f "$d/.env" 2>/dev/null; then PROJECT_DIR="$d"; break; fi
 done
-[ -n "$PROJECT_DIR" ] || die "No Supabase project (.env) found in CT $CTID."
+[ -n "$PROJECT_DIR" ] || die "No Supabase project (.env) found${CTID:+ in CT $CTID}."
 ENVF="$PROJECT_DIR/.env"
 OVRF="$PROJECT_DIR/docker-compose.override.yml"
-ok "Project: $PROJECT_DIR (CT $CTID)"
+if [ "$MODE" = host ]; then ok "Project: $PROJECT_DIR (CT $CTID, via pct from the host)"
+else ok "Project: $PROJECT_DIR (local, inside the container)"; fi
 
 # Some settings are hardcoded in upstream's docker-compose.yml rather than read
 # from .env — FILE_SIZE_LIMIT and ENABLE_IMAGE_TRANSFORMATION among them — so
@@ -57,10 +72,10 @@ ok "Project: $PROJECT_DIR (CT $CTID)"
 # The override file is regenerated whole on each run, so pick up what a previous
 # run put there; otherwise skipping a section here would silently drop it.
 OVR_TPL=0; OVR_FSL=""; OVR_IMG=""
-if pct exec "$CTID" -- test -f "$OVRF" 2>/dev/null; then
-  pct exec "$CTID" -- grep -q 'auth/templates' "$OVRF" 2>/dev/null && OVR_TPL=1
-  OVR_FSL=$(pct exec "$CTID" -- sh -c "grep -m1 'FILE_SIZE_LIMIT:' '$OVRF' 2>/dev/null | sed 's/.*: *//'" || true)
-  OVR_IMG=$(pct exec "$CTID" -- sh -c "grep -m1 'ENABLE_IMAGE_TRANSFORMATION:' '$OVRF' 2>/dev/null | sed 's/.*: *//' | tr -d '\"'" || true)
+if run test -f "$OVRF" 2>/dev/null; then
+  run grep -q 'auth/templates' "$OVRF" 2>/dev/null && OVR_TPL=1
+  OVR_FSL=$(run sh -c "grep -m1 'FILE_SIZE_LIMIT:' '$OVRF' 2>/dev/null | sed 's/.*: *//'" || true)
+  OVR_IMG=$(run sh -c "grep -m1 'ENABLE_IMAGE_TRANSFORMATION:' '$OVRF' 2>/dev/null | sed 's/.*: *//' | tr -d '\"'" || true)
 fi
 
 write_override() {
@@ -81,7 +96,7 @@ write_override() {
       ENABLE_IMAGE_TRANSFORMATION: \"$OVR_IMG\""
   fi
   [ "$y" = "services:" ] && return 0
-  pct exec "$CTID" -- env _F="$OVRF" _Y="$y" sh -c 'printf "%s\n" "$_Y" > "$_F"'
+  run env _F="$OVRF" _Y="$y" sh -c 'printf "%s\n" "$_Y" > "$_F"'
   ok "Wrote $(basename "$OVRF")"
 
   # Compose only auto-includes docker-compose.override.yml when COMPOSE_FILE is
@@ -106,7 +121,7 @@ write_override() {
 # untouched. sed would mangle several of these.
 set_env() {
   local k="$1" v="$2"
-  pct exec "$CTID" -- env _K="$k" _V="$v" _F="$ENVF" sh -c '
+  run env _K="$k" _V="$v" _F="$ENVF" sh -c '
     if grep -q "^${_K}=" "$_F"; then
       awk -v k="$_K" '\''BEGIN{v=ENVIRON["_V"]} $0 ~ "^" k "=" {print k "=" v; next} {print}'\'' "$_F" > "$_F.tmp" \
         && cat "$_F.tmp" > "$_F" && rm -f "$_F.tmp"
@@ -114,14 +129,14 @@ set_env() {
       printf "%s=%s\n" "$_K" "$_V" >> "$_F"
     fi'
 }
-get_env() { pct exec "$CTID" -- sh -c "grep -m1 '^$1=' '$ENVF' | cut -d= -f2-" 2>/dev/null || true; }
+get_env() { run sh -c "grep -m1 '^$1=' '$ENVF' | cut -d= -f2-" 2>/dev/null || true; }
 
 TOUCHED=""   # services needing recreation
 touch_svc() { case " $TOUCHED " in *" $1 "*) ;; *) TOUCHED="$TOUCHED $1" ;; esac; }
 
 # ------------------------------------------------------------------ backup ---
 BAK="$ENVF.bak-$(date +%Y%m%d-%H%M%S)"
-pct exec "$CTID" -- cp "$ENVF" "$BAK"
+run cp "$ENVF" "$BAK"
 ok "Backed up .env to $BAK"
 echo
 
@@ -153,7 +168,7 @@ if yes? "Configure Resend for transactional email?"; then
   if yes? "  Install branded email templates?"; then
     TPL="$PROJECT_DIR/volumes/auth/templates"
     SITE=$(get_env SITE_URL)
-    pct exec "$CTID" -- mkdir -p "$TPL"
+    run mkdir -p "$TPL"
 
     # GoTrue renders these with Go templating. {{ .ConfirmationURL }} is the
     # action link; {{ .Token }} is the 6-digit code if you prefer codes.
@@ -162,7 +177,7 @@ if yes? "Configure Resend for transactional email?"; then
              invite:"You have been invited":"You have been invited to create an account." \
              email_change:"Confirm your new email":"Confirm this address to complete the change."; do
       name="${t%%:*}"; rest="${t#*:}"; head="${rest%%:*}"; body="${rest#*:}"
-      pct exec "$CTID" -- env _P="$TPL/$name.html" _H="$head" _B="$body" _S="$SITE" sh -c '
+      run env _P="$TPL/$name.html" _H="$head" _B="$body" _S="$SITE" sh -c '
         cat > "$_P" <<EOF
 <!doctype html>
 <html>
@@ -274,7 +289,7 @@ if yes? "Configure Storage limits?"; then
   # Upstream hardcodes these in docker-compose.yml, so they are set through the
   # override file rather than .env. The live container is the honest source for
   # what is in effect right now.
-  CUR=$(pct exec "$CTID" -- docker inspect supabase-storage \
+  CUR=$(run docker inspect supabase-storage \
           --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
           | sed -n 's/^FILE_SIZE_LIMIT=//p' | head -1)
   info "Current upload limit: ${CUR:-unknown} bytes ($(( ${CUR:-0} / 1048576 )) MB)"
@@ -315,11 +330,11 @@ if yes? "Configure Edge Functions?"; then
     FN=$(ask "  Function name" "my-function")
     case "$FN" in ''|*[!a-zA-Z0-9_-]*) die "Invalid function name: $FN" ;; esac
     FD="$PROJECT_DIR/volumes/functions/$FN"
-    if pct exec "$CTID" -- test -d "$FD"; then
+    if run test -d "$FD"; then
       warn "$FN already exists — left untouched."
     else
-      pct exec "$CTID" -- mkdir -p "$FD"
-      pct exec "$CTID" -- env _P="$FD/index.ts" _N="$FN" sh -c 'cat > "$_P" <<EOF
+      run mkdir -p "$FD"
+      run env _P="$FD/index.ts" _N="$FN" sh -c 'cat > "$_P" <<EOF
 // $_N — served at /functions/v1/$_N
 Deno.serve(async (req) => {
   const { name = "world" } = await req.json().catch(() => ({}))
@@ -349,7 +364,7 @@ warn "must be recreated rather than restarted."
 yes? "Apply now?" || { warn "Not applied. Your edits are in $ENVF."; \
                        warn "Apply later with: pct exec $CTID -- sh -c 'cd $PROJECT_DIR && docker compose up -d$TOUCHED'"; exit 0; }
 
-pct exec "$CTID" -- sh -c "cd $PROJECT_DIR && docker compose up -d$TOUCHED"
+run sh -c "cd $PROJECT_DIR && docker compose up -d$TOUCHED"
 sleep 5
 
 echo
@@ -362,19 +377,19 @@ for s in $TOUCHED; do
     imgproxy)  C=supabase-imgproxy ;;
     *)         C="supabase-$s" ;;
   esac
-  ST=$(pct exec "$CTID" -- docker inspect "$C" --format '{{.State.Status}}' 2>/dev/null || echo missing)
+  ST=$(run docker inspect "$C" --format '{{.State.Status}}' 2>/dev/null || echo missing)
   [ "$ST" = "running" ] && ok "$C: $ST" || warn "$C: $ST — check: pct exec $CTID -- docker logs $C --tail 50"
 done
 
 if case " $TOUCHED " in *" auth "*) true ;; *) false ;; esac; then
   echo
   info "Auth settings now live in the container:"
-  pct exec "$CTID" -- docker inspect supabase-auth \
+  run docker inspect supabase-auth \
     --format '{{range .Config.Env}}{{println .}}{{end}}' \
     | grep -E '^GOTRUE_(SMS_PROVIDER|SMS_AUTOCONFIRM|MAILER_AUTOCONFIRM|MFA_ENABLED)=' \
     | sed 's/^/    /' || true
-  if pct exec "$CTID" -- test -n "$(pct exec "$CTID" -- docker inspect supabase-auth --format '{{len .Mounts}}' 2>/dev/null)"; then
-    pct exec "$CTID" -- docker inspect supabase-auth \
+  if run test -n "$(run docker inspect supabase-auth --format '{{len .Mounts}}' 2>/dev/null)"; then
+    run docker inspect supabase-auth \
       --format '{{range .Mounts}}    mount: {{.Source}} -> {{.Destination}}{{println}}{{end}}' || true
   fi
 fi
