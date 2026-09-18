@@ -230,6 +230,15 @@ pct exec "$CTID" -- sh -c "cd $PROJECT_DIR && sh run.sh start"
 echo
 ok "$APP is up in CT $CTID"
 echo
+if [ "$IPADDR" = "dhcp" ]; then
+  MAC=$(pct config "$CTID" | tr ',' '\n' | sed -n 's/^hwaddr=//p')
+  echo "  Address     $IP  ${YLW}(DHCP lease)${RST}  MAC $MAC"
+  echo "              Reserve it on your DHCP server: the lease address is"
+  echo "              written into .env and is never re-checked, so a new"
+  echo "              lease silently breaks Studio and auth."
+else
+  echo "  Address     $IP  (static)"
+fi
 echo "  Studio      http://$IP:8000"
 echo "  API base    http://$IP:8000"
 echo "  Project     $PROJECT_DIR (inside the container)"
