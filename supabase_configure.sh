@@ -62,20 +62,45 @@ ok "Project: $PROJECT_DIR"
 #
 # The override file is regenerated whole on each run, so pick up what a previous
 # run put there; otherwise skipping a section here would silently drop it.
-OVR_TPL=0; OVR_FSL=""; OVR_IMG=""
+OVR_TPL=0; OVR_FSL=""; OVR_IMG=""; OVR_AUTH=""
 if run test -f "$OVRF" 2>/dev/null; then
   run grep -q 'auth/templates' "$OVRF" 2>/dev/null && OVR_TPL=1
+  # recover forwarded auth vars so a skipped section does not drop them
+  OVR_AUTH=$(run sh -c "grep -oE '^ +GOTRUE_[A-Z0-9_]+:' '$OVRF' 2>/dev/null | tr -d ' :' | tr '
+' ' '" || true)
   OVR_FSL=$(run sh -c "grep -m1 'FILE_SIZE_LIMIT:' '$OVRF' 2>/dev/null | sed 's/.*: *//'" || true)
   OVR_IMG=$(run sh -c "grep -m1 'ENABLE_IMAGE_TRANSFORMATION:' '$OVRF' 2>/dev/null | sed 's/.*: *//' | tr -d '\"'" || true)
 fi
 
+# upstream's docker-compose.yml gives auth an explicit environment: block, so a
+# GOTRUE_* variable added to .env alone never reaches the container -- it is
+# simply not passed through. Anything we set has to be forwarded here too.
+auth_env() { case " $OVR_AUTH " in *" $1 "*) ;; *) OVR_AUTH="$OVR_AUTH $1" ;; esac; }
+
+# A GOTRUE_* var this script manages may already be in .env from an earlier run.
+# The override is rewritten whole each time, so forward those too -- otherwise
+# skipping a section on a later run silently stops passing what it set before.
+for _v in GOTRUE_SMS_PROVIDER           GOTRUE_SMS_TWILIO_ACCOUNT_SID GOTRUE_SMS_TWILIO_AUTH_TOKEN GOTRUE_SMS_TWILIO_MESSAGE_SERVICE_SID           GOTRUE_SMS_TWILIO_VERIFY_ACCOUNT_SID GOTRUE_SMS_TWILIO_VERIFY_AUTH_TOKEN GOTRUE_SMS_TWILIO_VERIFY_MESSAGE_SERVICE_SID           GOTRUE_SMS_MAX_FREQUENCY GOTRUE_SMS_OTP_EXP GOTRUE_SMS_OTP_LENGTH           GOTRUE_MFA_ENABLED GOTRUE_MFA_MAX_ENROLLED_FACTORS           GOTRUE_MFA_PHONE_ENROLL_ENABLED GOTRUE_MFA_PHONE_VERIFY_ENABLED           GOTRUE_MAILER_TEMPLATES_CONFIRMATION GOTRUE_MAILER_TEMPLATES_RECOVERY           GOTRUE_MAILER_TEMPLATES_INVITE GOTRUE_MAILER_TEMPLATES_EMAIL_CHANGE; do
+  run grep -q "^$_v=" "$ENVF" 2>/dev/null && auth_env "$_v"
+done
+
 write_override() {
   local y="services:"
-  if [ "$OVR_TPL" = 1 ]; then
+  if [ "$OVR_TPL" = 1 ] || [ -n "$OVR_AUTH" ]; then
     y="$y
-  auth:
+  auth:"
+    [ "$OVR_TPL" = 1 ] && y="$y
     volumes:
       - ./volumes/auth/templates:/etc/gotrue/templates:ro"
+    if [ -n "$OVR_AUTH" ]; then
+      y="$y
+    environment:"
+      for v in $OVR_AUTH; do
+        # value stays in .env; compose substitutes it here
+        y="$y
+      $v: \${$v}"
+      done
+    fi
   fi
   if [ -n "$OVR_FSL" ] || [ -n "$OVR_IMG" ]; then
     y="$y
@@ -204,9 +229,13 @@ EOF'
     # mounted into the container. The mount goes in the override file.
     OVR_TPL=1
     set_env GOTRUE_MAILER_TEMPLATES_CONFIRMATION "/etc/gotrue/templates/confirmation.html"
+    auth_env GOTRUE_MAILER_TEMPLATES_CONFIRMATION
     set_env GOTRUE_MAILER_TEMPLATES_RECOVERY     "/etc/gotrue/templates/recovery.html"
+    auth_env GOTRUE_MAILER_TEMPLATES_RECOVERY
     set_env GOTRUE_MAILER_TEMPLATES_INVITE       "/etc/gotrue/templates/invite.html"
+    auth_env GOTRUE_MAILER_TEMPLATES_INVITE
     set_env GOTRUE_MAILER_TEMPLATES_EMAIL_CHANGE "/etc/gotrue/templates/email_change.html"
+    auth_env GOTRUE_MAILER_TEMPLATES_EMAIL_CHANGE
     ok "Templates written to volumes/auth/templates and mounted at /etc/gotrue/templates."
 
     CF=$(get_env COMPOSE_FILE)
@@ -234,18 +263,26 @@ if yes? "Configure Twilio for SMS OTP and 2FA?"; then
   if [ "$TW_MODE" = "messaging" ]; then
     TW_SVC=$(ask "  Messaging Service SID (MG...)")
     set_env GOTRUE_SMS_PROVIDER                 "twilio"
+    auth_env GOTRUE_SMS_PROVIDER
     set_env GOTRUE_SMS_TWILIO_ACCOUNT_SID       "$TW_SID"
+    auth_env GOTRUE_SMS_TWILIO_ACCOUNT_SID
     set_env GOTRUE_SMS_TWILIO_AUTH_TOKEN        "$TW_TOK"
+    auth_env GOTRUE_SMS_TWILIO_AUTH_TOKEN
     set_env GOTRUE_SMS_TWILIO_MESSAGE_SERVICE_SID "$TW_SVC"
+    auth_env GOTRUE_SMS_TWILIO_MESSAGE_SERVICE_SID
   else
     TW_SVC=$(ask "  Verify Service SID (VA...)")
     # GoTrue reads a DIFFERENT set of variables per provider. Selecting
     # "twilio" while setting the _VERIFY_ variables leaves it with no
     # credentials at all — a silent misconfiguration.
     set_env GOTRUE_SMS_PROVIDER                        "twilio_verify"
+    auth_env GOTRUE_SMS_PROVIDER
     set_env GOTRUE_SMS_TWILIO_VERIFY_ACCOUNT_SID       "$TW_SID"
+    auth_env GOTRUE_SMS_TWILIO_VERIFY_ACCOUNT_SID
     set_env GOTRUE_SMS_TWILIO_VERIFY_AUTH_TOKEN        "$TW_TOK"
+    auth_env GOTRUE_SMS_TWILIO_VERIFY_AUTH_TOKEN
     set_env GOTRUE_SMS_TWILIO_VERIFY_MESSAGE_SERVICE_SID "$TW_SVC"
+    auth_env GOTRUE_SMS_TWILIO_VERIFY_MESSAGE_SERVICE_SID
   fi
   case "$TW_SVC" in
     VA*) [ "$TW_MODE" = "verify" ]    || warn "SID looks like a Verify service but mode is 'messaging'." ;;
@@ -257,16 +294,23 @@ if yes? "Configure Twilio for SMS OTP and 2FA?"; then
   # which defeats the entire point of configuring Twilio.
   set_env ENABLE_PHONE_AUTOCONFIRM "false"
   set_env GOTRUE_SMS_MAX_FREQUENCY "60s"
+  auth_env GOTRUE_SMS_MAX_FREQUENCY
   set_env GOTRUE_SMS_OTP_EXP       "60"
+  auth_env GOTRUE_SMS_OTP_EXP
   set_env GOTRUE_SMS_OTP_LENGTH    "6"
+  auth_env GOTRUE_SMS_OTP_LENGTH
   ok "SMS OTP enabled; phone numbers must now be verified."
 
   if yes? "  Enable TOTP 2FA (authenticator apps)?"; then
     set_env GOTRUE_MFA_ENABLED              "true"
+    auth_env GOTRUE_MFA_ENABLED
     set_env GOTRUE_MFA_MAX_ENROLLED_FACTORS "10"
+    auth_env GOTRUE_MFA_MAX_ENROLLED_FACTORS
     if yes? "  Also allow SMS as a second factor (costs per message)?"; then
       set_env GOTRUE_MFA_PHONE_ENROLL_ENABLED "true"
+      auth_env GOTRUE_MFA_PHONE_ENROLL_ENABLED
       set_env GOTRUE_MFA_PHONE_VERIFY_ENABLED "true"
+      auth_env GOTRUE_MFA_PHONE_VERIFY_ENABLED
     fi
     ok "MFA enabled. Drive it client-side with auth.mfa.enroll/challenge/verify,"
     ok "and enforce aal2 in RLS rather than trusting the client."
