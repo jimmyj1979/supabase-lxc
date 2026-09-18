@@ -2,10 +2,10 @@
 #
 # supabase_configure.sh — post-install configuration for a Supabase LXC
 #
-# Run EITHER on the Proxmox host, naming the container:
-#   bash supabase_configure.sh <CTID>
-# OR inside the Supabase container itself, with no argument:
+# Run INSIDE the Supabase container (pct enter <CTID> first):
 #   bash supabase_configure.sh
+#
+# The deploy script offers to fetch and run this at the end of an install.
 #
 # Configures, each section skippable and safe to re-run:
 #   * Resend        — SMTP for email verification, plus branded templates
@@ -31,25 +31,17 @@ asks()  { local p="$1" a; read -rsp "$p: " a; echo >&2; printf '%s' "$a"; }   # 
 yes?()  { local a; read -rp "$1 [y/N] " a; [[ "${a,,}" == "y" ]]; }
 
 # ------------------------------------------------------------------- where ---
-# Runs either on the Proxmox host (reaching into a container with pct exec) or
-# inside the Supabase container itself. On the host a CTID is required; inside
-# the container it is neither needed nor accepted.
+# This runs INSIDE the Supabase container, not on the Proxmox host. The deploy
+# script offers to fetch and run it for you at the end of an install; otherwise
+# get into the container first with `pct enter <CTID>`.
 [ "$(id -u)" -eq 0 ] || die "Run as root."
 
 if command -v pveversion >/dev/null 2>&1; then
-  MODE=host
-  CTID="${1:-}"
-  [ -n "$CTID" ] || die "Usage (on the Proxmox host): $SCRIPT_NAME <CTID>"
-  pct status "$CTID" >/dev/null 2>&1 || die "CT $CTID not found."
-  [ "$(pct status "$CTID")" = "status: running" ] || die "CT $CTID is not running."
-  run() { pct exec "$CTID" -- "$@"; }
-else
-  MODE=container
-  CTID=""
-  command -v docker >/dev/null 2>&1 ||     die "Not a Proxmox host and no docker here — run this on the PVE host with a CTID, or inside the Supabase container."
-  [ -z "${1:-}" ] || warn "Ignoring argument '$1' — a CTID is only used on the Proxmox host."
-  run() { "$@"; }
+  die "This runs inside the Supabase container, not on the Proxmox host. Use: pct enter <CTID>"
 fi
+command -v docker >/dev/null 2>&1   || die "No docker here — this must run inside the Supabase container."
+
+run() { "$@"; }
 
 # The installer uses /opt/supabase-project; containers built by other helper
 # scripts commonly use /root/supabase-project. Find whichever is really there.
@@ -57,11 +49,10 @@ PROJECT_DIR=""
 for d in /opt/supabase-project /root/supabase-project /opt/supabase/docker; do
   if run test -f "$d/.env" 2>/dev/null; then PROJECT_DIR="$d"; break; fi
 done
-[ -n "$PROJECT_DIR" ] || die "No Supabase project (.env) found${CTID:+ in CT $CTID}."
+[ -n "$PROJECT_DIR" ] || die "No Supabase project (.env) found in this container."
 ENVF="$PROJECT_DIR/.env"
 OVRF="$PROJECT_DIR/docker-compose.override.yml"
-if [ "$MODE" = host ]; then ok "Project: $PROJECT_DIR (CT $CTID, via pct from the host)"
-else ok "Project: $PROJECT_DIR (local, inside the container)"; fi
+ok "Project: $PROJECT_DIR"
 
 # Some settings are hardcoded in upstream's docker-compose.yml rather than read
 # from .env — FILE_SIZE_LIMIT and ENABLE_IMAGE_TRANSFORMATION among them — so
@@ -362,7 +353,7 @@ info "Services to recreate:$TOUCHED"
 warn "Compose bakes environment into a container when it is created, so these"
 warn "must be recreated rather than restarted."
 yes? "Apply now?" || { warn "Not applied. Your edits are in $ENVF."; \
-                       warn "Apply later with: pct exec $CTID -- sh -c 'cd $PROJECT_DIR && docker compose up -d$TOUCHED'"; exit 0; }
+                       warn "Apply later with: cd $PROJECT_DIR && docker compose up -d$TOUCHED"; exit 0; }
 
 run sh -c "cd $PROJECT_DIR && docker compose up -d$TOUCHED"
 sleep 5
@@ -378,7 +369,7 @@ for s in $TOUCHED; do
     *)         C="supabase-$s" ;;
   esac
   ST=$(run docker inspect "$C" --format '{{.State.Status}}' 2>/dev/null || echo missing)
-  [ "$ST" = "running" ] && ok "$C: $ST" || warn "$C: $ST — check: pct exec $CTID -- docker logs $C --tail 50"
+  [ "$ST" = "running" ] && ok "$C: $ST" || warn "$C: $ST — check: docker logs $C --tail 50"
 done
 
 if case " $TOUCHED " in *" auth "*) true ;; *) false ;; esac; then

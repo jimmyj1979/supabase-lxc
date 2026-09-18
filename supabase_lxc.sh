@@ -24,6 +24,8 @@ DEFAULT_SWAP=512
 DEFAULT_BRIDGE="vmbr0"
 DEFAULT_UNPRIVILEGED=1
 DEFAULT_IP="dhcp"         # or a CIDR address, e.g. 192.168.1.50/24
+CONFIGURE_NAME="supabase_configure.sh"
+CONFIGURE_URL="https://raw.githubusercontent.com/jimmyj1979/supabase-lxc/main/supabase_configure.sh"
 PROJECT_DIR="/opt/supabase-project"
 
 # ------------------------------------------------------------------ output ---
@@ -357,3 +359,28 @@ echo
 warn "Studio is behind HTTP basic auth and the stack is plain HTTP."
 warn "Put it behind your Cloudflare tunnel or add the Caddy overlay before exposing it."
 echo
+
+# ------------------------------------------------- post-install configure ----
+# supabase_configure.sh runs inside the container, so fetch it there and hand
+# over. Offered rather than assumed: it asks for Twilio and Resend credentials,
+# which nobody necessarily has to hand at this moment.
+echo "  ${BLU}Optional:${RST} configure Resend (email), Twilio (SMS OTP and 2FA),"
+echo "            storage limits and edge functions."
+echo "            You will need your Twilio and Resend credentials."
+read -rp "  Run the post-install configuration now? [y/N] " a
+if [[ "${a,,}" == "y" ]]; then
+  info "Fetching $CONFIGURE_NAME into the container"
+  if pct exec "$CTID" -- bash -c "curl -fsSL '$CONFIGURE_URL' -o /root/$CONFIGURE_NAME && bash -n /root/$CONFIGURE_NAME"; then
+    echo
+    pct exec "$CTID" -- bash "/root/$CONFIGURE_NAME"
+  else
+    warn "Could not fetch $CONFIGURE_URL — skipping."
+    warn "Run it later with: pct enter $CTID, then re-run the curl above."
+  fi
+else
+  echo
+  echo "  Configure later:  pct enter $CTID"
+  echo "                    curl -fsSL $CONFIGURE_URL -o $CONFIGURE_NAME"
+  echo "                    bash $CONFIGURE_NAME"
+  echo
+fi

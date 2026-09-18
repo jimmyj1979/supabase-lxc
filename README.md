@@ -40,20 +40,20 @@ pct exec <CTID> -- supabase restart [svc]
 ## Post-install configuration
 
 `supabase_configure.sh` configures the things the installer deliberately leaves
-alone. Run it as many times as you like, from wherever suits you — it detects
-where it is:
+alone. **It runs inside the container**, not on the Proxmox host.
+
+The installer offers to fetch and run it for you at the end of a deployment —
+that is the easiest path. To run it later, or again:
 
 ```sh
-# On the Proxmox host, naming the container:
-bash supabase_configure.sh <CTID>
-
-# Or inside the Supabase container itself, with no argument:
+pct enter <CTID>
+curl -fsSL https://raw.githubusercontent.com/jimmyj1979/supabase-lxc/main/supabase_configure.sh -o supabase_configure.sh
 bash supabase_configure.sh
 ```
 
-Running it on the host is convenient straight after an install, when the
-container has no SSH access set up yet. Running it inside the container works
-for any Supabase docker deployment, Proxmox or not.
+It is safe to re-run as often as you like. Because it runs in the container and
+finds the project directory itself, it also works on any Supabase docker
+deployment, Proxmox or not.
 
 Every section is optional and is skipped with a plain `n`:
 
@@ -66,8 +66,8 @@ Every section is optional and is skipped with a plain `n`:
 
 It backs `.env` up first, changes nothing until you confirm at the end, and
 recreates only the services that are actually affected. It finds the project
-directory itself, so it works on containers built by other helper scripts that
-use `/root/supabase-project`.
+directory itself, so it also handles installs that live in
+`/root/supabase-project` rather than `/opt/supabase-project`.
 
 Three things it handles that are easy to get wrong by hand:
 
