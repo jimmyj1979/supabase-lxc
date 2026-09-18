@@ -37,6 +37,57 @@ pct exec <CTID> -- supabase logs [svc]
 pct exec <CTID> -- supabase restart [svc]
 ```
 
+## Addressing — the container's IP is baked into `.env`
+
+The installer asks for either a static CIDR address or `dhcp`. Whichever you
+choose, the address the container ends up with is written into three variables
+in `.env` and **is never re-checked afterwards**:
+
+```
+SUPABASE_PUBLIC_URL=http://<IP>:8000
+API_EXTERNAL_URL=http://<IP>:8000/auth/v1
+SITE_URL=http://<IP>:3000
+```
+
+That is unavoidable — Studio, the API gateway and the auth redirect flow all
+need an absolute URL, and there is no name to use unless you put one there
+yourself.
+
+The consequence: **if the address changes, the stack keeps running but Studio
+and auth break**, and the failure gives no hint as to why. Services stay
+healthy, the ports stay open, and requests are simply redirected to an address
+that is no longer the container.
+
+So if you pick DHCP, either reserve the lease on your DHCP server or treat the
+deployment as temporary. The installer prints the allocated address and MAC at
+the end specifically so you can go and reserve it.
+
+### Moving an existing deployment to a new address
+
+Changing the container's NIC alone is not enough — the three `.env` values must
+change with it, or Studio and auth will point at the old address:
+
+```sh
+pct set <CTID> --net0 name=eth0,bridge=vmbr0,ip=192.168.1.50/24,gw=192.168.1.1
+
+pct exec <CTID> -- sh -c '
+  cd /opt/supabase-project
+  sed -i "s|^SUPABASE_PUBLIC_URL=.*|SUPABASE_PUBLIC_URL=http://192.168.1.50:8000|" .env
+  sed -i "s|^API_EXTERNAL_URL=.*|API_EXTERNAL_URL=http://192.168.1.50:8000/auth/v1|" .env
+  sed -i "s|^SITE_URL=.*|SITE_URL=http://192.168.1.50:3000|" .env
+'
+
+pct exec <CTID> -- supabase start
+```
+
+Use `supabase start` (which is `docker compose up -d --wait`) rather than
+rebooting the container. Compose bakes environment variables into a container
+when it is created, so a reboot brings the services back with the **old**
+address still in place; `up -d` recreates the ones whose configuration changed.
+
+The same applies if you later put the stack behind a domain or a tunnel: point
+these three at the public URL rather than the container's LAN address.
+
 ## Security
 
 **This script sets `lxc.apparmor.profile: unconfined` on every container it
