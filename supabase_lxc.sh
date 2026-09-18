@@ -210,6 +210,13 @@ pct exec "$CTID" -- bash -c "
   sed -i 's|^SITE_URL=.*|SITE_URL=http://$IP:3000|' .env
 "
 
+# setup.sh randomises every secret but leaves DASHBOARD_USERNAME as the literal
+# "supabase", so the Studio basic-auth username is identical on every install.
+# Randomise it too, before the stack starts and reads .env.
+info "Randomising the dashboard username"
+DASH_USER="admin_$(openssl rand -hex 4)"
+pct exec "$CTID" -- sh -c "cd $PROJECT_DIR && sed -i 's|^DASHBOARD_USERNAME=.*|DASHBOARD_USERNAME=$DASH_USER|' .env"
+
 if [[ "${ENABLE_LOGS,,}" == "y" ]]; then
   info "Enabling the logs overlay"
   pct exec "$CTID" -- sh -c "cd $PROJECT_DIR && sh run.sh config add logs"
@@ -245,6 +252,33 @@ fi
 echo "  Studio      http://$IP:8000"
 echo "  API base    http://$IP:8000"
 echo "  Project     $PROJECT_DIR (inside the container)"
+echo
+
+# ----------------------------------------------------------- credentials -----
+# Pull .env once rather than shelling into the container per variable.
+ENVFILE=$(pct exec "$CTID" -- cat "$PROJECT_DIR/.env")
+cred() { printf '%s\n' "$ENVFILE" | grep -m1 "^$1=" | cut -d= -f2-; }
+show() { printf "  %-26s %s\n" "$1" "$(cred "$2")"; }
+
+echo "  ${YLW}———— Credentials — shown once ————${RST}"
+echo
+show "Dashboard username"   DASHBOARD_USERNAME
+show "Dashboard password"   DASHBOARD_PASSWORD
+show "Postgres password"    POSTGRES_PASSWORD
+show "JWT secret"           JWT_SECRET
+show "Anon key"             ANON_KEY
+show "Service role key"     SERVICE_ROLE_KEY
+show "Secret key base"      SECRET_KEY_BASE
+show "Vault enc key"        VAULT_ENC_KEY
+show "PG meta crypto key"   PG_META_CRYPTO_KEY
+echo
+# ANON_KEY/SERVICE_ROLE_KEY are the legacy JWT-style keys; recent Supabase
+# gates the API on these two instead, so show them or callers get 403s.
+show "Publishable key"      SUPABASE_PUBLISHABLE_KEY
+show "Secret key"           SUPABASE_SECRET_KEY
+echo
+warn "Store these now. They are not shown again."
+warn "They remain in $PROJECT_DIR/.env inside the container."
 echo
 echo "  Credentials:  pct exec $CTID -- supabase secrets"
 echo "  Logs:         pct exec $CTID -- supabase logs [service]"
