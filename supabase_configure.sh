@@ -26,8 +26,16 @@ info()  { echo "${BLU}==>${RST} $*"; }
 ok()    { echo "${GRN} ok${RST} $*"; }
 warn()  { echo "${YLW}  !${RST} $*"; }
 die()   { echo "${RED}  x${RST} $*" >&2; exit 1; }
-ask()   { local p="$1" d="${2:-}" a; read -rp "$p${d:+ [$d]}: " a; printf '%s' "${a:-$d}"; }
-asks()  { local p="$1" a; read -rsp "$p: " a; echo >&2; printf '%s' "$a"; }   # silent
+# pct exec gives the script no TTY, so Enter arrives as a carriage return and
+# lands inside the value. Strip it, plus surrounding whitespace, or secrets get
+# written to .env with an invisible  on the end.
+clean() { local v="$1"; v="${v%$''}"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"; printf '%s' "$v"; }
+ask()   { local p="$1" d="${2:-}" a; read -rp "$p${d:+ [$d]}: " a; a=$(clean "$a"); printf '%s' "${a:-$d}"; }
+# Deliberately NOT hidden. pct exec gives no TTY, so a hidden prompt shows no
+# feedback at all and a paste that fails to register looks identical to one
+# that worked -- which is how an empty key reached .env once. The value is
+# visible on screen and in scrollback; the secrets are in .env anyway.
+asks()  { local p="$1" a; read -rp "$p: " a; clean "$a"; }
 yes?()  { local a; read -rp "$1 [y/N] " a; [[ "${a,,}" == "y" ]]; }
 
 # ------------------------------------------------------------------- where ---
@@ -162,10 +170,26 @@ if yes? "Configure Resend for transactional email?"; then
   warn "The From address must be on a domain verified in your Resend account,"
   warn "or Resend silently rejects the mail and signups appear to hang."
 
-  RS_KEY=$(asks "  Resend API key (re_...)")
-  [ -n "$RS_KEY" ] || die "No API key given."
-  RS_FROM=$(ask  "  From address (on your verified domain)")
-  [ -n "$RS_FROM" ] || die "No From address given."
+  # Input is hidden, so a paste that silently failed used to be written to .env
+  # as-is and only surfaced when mail stopped working. Check the shape instead.
+  while :; do
+    RS_KEY=$(asks "  Resend API key (re_...)")
+    [ -n "$RS_KEY" ] || die "No API key given."
+    case "$RS_KEY" in
+      re_*) ok "Captured a key of ${#RS_KEY} characters starting 're_'." ; break ;;
+      *)    warn "Captured ${#RS_KEY} character(s), not starting with 're_'."
+            warn "Resend keys always begin 're_' — if your paste did not register, try again." ;;
+    esac
+  done
+
+  while :; do
+    RS_FROM=$(ask  "  From address (on your verified domain)")
+    [ -n "$RS_FROM" ] || die "No From address given."
+    case "$RS_FROM" in
+      *@*.*) break ;;
+      *) warn "'$RS_FROM' is not an email address — it needs to look like noreply@example.com." ;;
+    esac
+  done
   RS_NAME=$(ask  "  Sender name" "Supabase")
 
   set_env SMTP_HOST         "smtp.resend.com"
@@ -257,8 +281,10 @@ if yes? "Configure Twilio for SMS OTP and 2FA?"; then
 
   TW_SID=$(ask  "  Twilio Account SID (AC...)")
   [ -n "$TW_SID" ] || die "No Account SID given."
+  case "$TW_SID" in AC*) : ;; *) warn "Account SIDs normally start with 'AC' — '$TW_SID' may be wrong." ;; esac
   TW_TOK=$(asks "  Twilio Auth Token")
   [ -n "$TW_TOK" ] || die "No Auth Token given."
+  ok "Captured a token of ${#TW_TOK} characters."
 
   if [ "$TW_MODE" = "messaging" ]; then
     TW_SVC=$(ask "  Messaging Service SID (MG...)")
