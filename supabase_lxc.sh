@@ -221,7 +221,10 @@ pct exec "$CTID" -- bash -c "cat > /usr/local/bin/supabase <<'EOF'
 cd $PROJECT_DIR || exit 1
 exec sh run.sh \"\$@\"
 EOF
-chmod +x /usr/local/bin/supabase"
+chmod +x /usr/local/bin/supabase
+# pct exec runs with PATH=/sbin:/bin:/usr/sbin:/usr/bin — no /usr/local/bin —
+# so 'pct exec <CTID> -- supabase logs' fails without this symlink.
+ln -sf /usr/local/bin/supabase /usr/bin/supabase"
 
 info "Starting the stack (waiting for all services to report healthy)"
 pct exec "$CTID" -- sh -c "cd $PROJECT_DIR && sh run.sh start"
