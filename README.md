@@ -7,7 +7,7 @@ A Proxmox VE helper script that deploys self-hosted Supabase into a Debian LXC.
 Run on the **Proxmox host** (as root), not inside a guest:
 
 ```sh
-bash -c "$(curl -fsSL http://192.168.0.94:3000/jimmyj1979/supabase-lxc/raw/branch/main/supabase_lxc.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/jimmyj1979/supabase-lxc/main/supabase_lxc.sh)"
 ```
 
 The script prompts for CTID, hostname, cores, RAM, disk, bridge and storage,

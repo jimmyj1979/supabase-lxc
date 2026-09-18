@@ -3,7 +3,7 @@
 # supabase_lxc.sh — deploy self-hosted Supabase into a Debian LXC on Proxmox VE
 #
 # Run on the Proxmox host (not inside a guest):
-#   bash -c "$(curl -fsSL http://192.168.0.94:3000/jimmyj1979/supabase-lxc/raw/branch/main/supabase_lxc.sh)"
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/jimmyj1979/supabase-lxc/main/supabase_lxc.sh)"
 #
 # Update an existing deployment (snapshots first):
 #   bash supabase_lxc.sh update <CTID>
@@ -23,7 +23,7 @@ DEFAULT_DISK=60           # GB — 40 minimum, more if Storage holds real files
 DEFAULT_SWAP=512
 DEFAULT_BRIDGE="vmbr0"
 DEFAULT_UNPRIVILEGED=1
-DEFAULT_IP="dhcp"         # or a CIDR address, e.g. 192.168.0.210/24
+DEFAULT_IP="dhcp"         # or a CIDR address, e.g. 192.168.1.50/24
 PROJECT_DIR="/opt/supabase-project"
 
 # ------------------------------------------------------------------ output ---
@@ -82,7 +82,7 @@ read -rp "Bridge [$DEFAULT_BRIDGE]: " BRIDGE; BRIDGE=${BRIDGE:-$DEFAULT_BRIDGE}
 
 # A DHCP lease gets baked into SUPABASE_PUBLIC_URL/API_EXTERNAL_URL/SITE_URL
 # below, so a later lease change silently breaks Studio and auth. Prefer static.
-read -rp "IP as CIDR (e.g. 192.168.0.210/24) or 'dhcp' [$DEFAULT_IP]: " IPADDR
+read -rp "IP as CIDR (e.g. 192.168.1.50/24) or 'dhcp' [$DEFAULT_IP]: " IPADDR
 IPADDR=${IPADDR:-$DEFAULT_IP}
 if [ "$IPADDR" = "dhcp" ]; then
   NET0="name=eth0,bridge=$BRIDGE,ip=dhcp"
