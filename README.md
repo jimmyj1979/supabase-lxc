@@ -137,5 +137,14 @@ Also worth knowing:
 - **Sizing:** defaults are 4 cores / 8 GB RAM / 60 GB disk. Upstream's minimum
   is 4 GB RAM and 40 GB disk; the Logs & Analytics overlay (Logflare + Vector)
   adds another 1–2 GB of RAM.
+- **Disk, measured:** a fresh install occupies **9.7 GB** — 6.6 GB of Docker
+  image layers, ~900 MB of Debian plus the Docker engine, and ~50 MB of project
+  files. It will not install under roughly 11 GB. Two long-running instances
+  measured on the same host had reached 26–27 GB, the growth being Postgres
+  data and container logs rather than anything in the install, so 40 GB is a
+  sensible floor and the 60 GB default leaves real headroom.
+- **Container logs are capped** at 10 MB × 3 files per service via
+  `/etc/docker/daemon.json`. Docker's `json-file` default is unbounded, and an
+  11-service stack left alone will fill a disk with logs eventually.
 - **Exposure:** the stack is plain HTTP and Studio sits behind basic auth only.
   Put it behind a Cloudflare tunnel or add the Caddy overlay before exposing it.

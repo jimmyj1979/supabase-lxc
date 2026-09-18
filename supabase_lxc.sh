@@ -217,6 +217,18 @@ pct exec "$CTID" -- bash -c '
 
 info "Installing Docker Engine"
 pct exec "$CTID" -- bash -c 'curl -fsSL https://get.docker.com | sh >/dev/null 2>&1'
+
+# Docker's default json-file driver has no size limit and no rotation, so
+# container logs grow until the disk fills. A Supabase stack is 11 chatty
+# services, so cap them before the daemon's first start.
+info "Capping container log growth"
+pct exec "$CTID" -- bash -c 'mkdir -p /etc/docker && cat > /etc/docker/daemon.json <<EOF
+{
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" }
+}
+EOF'
+
 pct exec "$CTID" -- systemctl enable --now docker >/dev/null 2>&1
 pct exec "$CTID" -- docker --version
 
