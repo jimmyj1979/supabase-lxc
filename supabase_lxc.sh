@@ -133,8 +133,29 @@ else
   TEMPLATE_RE='^debian-12-standard'
 fi
 
-TEMPLATE=$(pveam available --section system | awk '{print $2}' | grep -E "$TEMPLATE_RE" | sort -V | tail -1)
-[ -n "$TEMPLATE" ] || die "No Debian standard template matching $TEMPLATE_RE available from pveam."
+# pveam lists every architecture it knows about, and "arm64" sorts after
+# "amd64", so an unfiltered `sort -V | tail -1` can hand an amd64 host the ARM64
+# template. pct create accepts it and the container then fails to start with
+# "Detected container architecture: arm64 ... Failed to spawn container".
+# Reported as issue #1 by @soundslikecrisps.
+HOST_ARCH=$(dpkg --print-architecture)
+case "$HOST_ARCH" in
+  amd64|arm64) : ;;
+  *) die "Unsupported host architecture: $HOST_ARCH" ;;
+esac
+
+TEMPLATE=$(pveam available --section system \
+  | awk '{print $2}' \
+  | grep -E "$TEMPLATE_RE" \
+  | grep -E "_${HOST_ARCH}\.tar\.(zst|gz|xz)$" \
+  | sort -V | tail -1)
+[ -n "$TEMPLATE" ] || die "No Debian standard template matching $TEMPLATE_RE for architecture $HOST_ARCH."
+
+# Belt and braces: never hand pct create a template of the wrong architecture.
+case "$TEMPLATE" in
+  *"_${HOST_ARCH}.tar."*) : ;;
+  *) die "Template architecture mismatch: host=$HOST_ARCH template=$TEMPLATE" ;;
+esac
 
 TPL_STORAGE=$(pvesm status -content vztmpl | awk 'NR==2 {print $1}')
 if ! pveam list "$TPL_STORAGE" 2>/dev/null | grep -q "$TEMPLATE"; then
