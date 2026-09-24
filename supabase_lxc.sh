@@ -220,14 +220,27 @@ pct exec "$CTID" -- bash -c '
 info "Installing Docker Engine"
 pct exec "$CTID" -- bash -c 'curl -fsSL https://get.docker.com | sh >/dev/null 2>&1'
 
-# Docker's default json-file driver has no size limit and no rotation, so
-# container logs grow until the disk fills. A Supabase stack is 11 chatty
-# services, so cap them before the daemon's first start.
-info "Capping container log growth"
+# Two daemon settings, both before the daemon's first start:
+#
+# log-driver/log-opts: Docker's default json-file driver has no size limit and
+# no rotation, so container logs grow until the disk fills. A Supabase stack is
+# 11 chatty services.
+#
+# dns-search: Proxmox ships "search local" in /etc/resolv.conf. The container
+# inherits it, Docker copies it into every service, and any lookup that fails
+# inside the Docker network is retried as "<service>.local" and forwarded to
+# the LAN resolver. Measured on a real deploy: 43 queries for auth.local,
+# rest.local, storage.local, meta.local, functions.local and studio.local
+# leaked onto the LAN during one startup. They are almost all AAAA -- the A
+# records resolve internally, the IPv6 ones find nothing and fall through.
+# "." means no search domain. Services resolve each other by bare name through
+# Docker's embedded DNS, which needs no search list.
+info "Capping container log growth and stopping DNS search-domain leakage"
 pct exec "$CTID" -- bash -c 'mkdir -p /etc/docker && cat > /etc/docker/daemon.json <<EOF
 {
   "log-driver": "json-file",
-  "log-opts": { "max-size": "10m", "max-file": "3" }
+  "log-opts": { "max-size": "10m", "max-file": "3" },
+  "dns-search": ["."]
 }
 EOF'
 

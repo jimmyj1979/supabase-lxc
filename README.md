@@ -138,6 +138,47 @@ address still in place; `up -d` recreates the ones whose configuration changed.
 The same applies if you later put the stack behind a domain or a tunnel: point
 these three at the public URL rather than the container's LAN address.
 
+## DNS: service names on your LAN
+
+Proxmox ships `search local` in `/etc/resolv.conf`. An LXC inherits it, Docker
+copies it into every container, and any lookup that fails inside the Docker
+network is retried with the search domain appended and forwarded to the LAN
+resolver. On a stock deploy that means queries like these hitting your router:
+
+```
+AAAA? auth.local.      AAAA? rest.local.       AAAA? storage.local.
+AAAA? meta.local.      AAAA? functions.local.  AAAA? studio.local.
+```
+
+They are almost all `AAAA`: the `A` records resolve internally, the IPv6 ones
+find nothing and fall through. Nothing leaves the machine but the names — no
+payload, no connection — but it does advertise the service layout to anything
+watching DNS, and `.local` is reserved for mDNS (RFC 6762), so the queries are
+malformed as well as noisy.
+
+The installer sets `"dns-search": ["."]` in `/etc/docker/daemon.json`, which
+removes the search domain. Containers resolve each other by bare service name
+through Docker's embedded DNS and do not need one.
+
+Measured on a real deployment, one startup each:
+
+| | Stock | With the fix |
+|---|---|---|
+| `.local` queries | 43 | **0** |
+| Bare service-name queries | 78 | 12 |
+
+**It does not eliminate the leakage entirely.** Docker's embedded resolver
+still forwards single-label names upstream when it cannot answer them, so a
+handful of bare `auth.` / `db.` / `functions.` queries still reach the LAN
+resolver during startup. Stopping those completely means preventing the
+container from reaching an external resolver at all, which breaks image pulls
+and the edge runtime. If that matters in your environment, point the container
+at a resolver that answers single-label names with NXDOMAIN rather than
+forwarding them.
+
+Worth knowing the stack also resolves **`jsr.io`** repeatedly — that is the
+edge-functions Deno runtime fetching its dependencies, not part of this script.
+
 ## Security
 
 **This script sets `lxc.apparmor.profile: unconfined` on every container it
