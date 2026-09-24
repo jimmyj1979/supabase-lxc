@@ -156,25 +156,37 @@ payload, no connection — but it does advertise the service layout to anything
 watching DNS, and `.local` is reserved for mDNS (RFC 6762), so the queries are
 malformed as well as noisy.
 
-The installer sets `"dns-search": ["."]` in `/etc/docker/daemon.json`, which
-removes the search domain. Containers resolve each other by bare service name
-through Docker's embedded DNS and do not need one.
+The installer fixes this in two parts, both before the Docker daemon first
+starts:
 
-Measured on a real deployment, one startup each:
+1. `"dns-search": ["."]` in `/etc/docker/daemon.json` removes the inherited
+   search domain, so nothing is retried as `<service>.local`.
+2. **dnsmasq**, bound to the `docker0` bridge only and configured with
+   `domain-needed`, which *"never forwards A or AAAA queries for plain names,
+   without dots or domain parts, to upstream nameservers"*. Containers are
+   pointed at it with `"dns": ["172.17.0.1"]`.
 
-| | Stock | With the fix |
-|---|---|---|
-| `.local` queries | 43 | **0** |
-| Bare service-name queries | 78 | 12 |
+The second part matters: removing the search domain alone still left bare
+`auth`, `db` and `functions` queries going upstream, because Docker's embedded
+resolver forwards anything it cannot answer. dnsmasq answers those NXDOMAIN
+locally and forwards only real hostnames.
 
-**It does not eliminate the leakage entirely.** Docker's embedded resolver
-still forwards single-label names upstream when it cannot answer them, so a
-handful of bare `auth.` / `db.` / `functions.` queries still reach the LAN
-resolver during startup. Stopping those completely means preventing the
-container from reaching an external resolver at all, which breaks image pulls
-and the edge runtime. If that matters in your environment, point the container
-at a resolver that answers single-label names with NXDOMAIN rather than
-forwarding them.
+Measured on one container, identical force-recreate startups:
+
+| | Stock | Search domain removed | Both |
+|---|---|---|---|
+| `.local` queries | 43 | 0 | **0** |
+| Bare service-name queries | 78 | 12 | **0** |
+| Total DNS packets to the LAN | 356 | 24 | **0** |
+| Stack healthy | 11/11 | 11/11 | **11/11** |
+
+Service-to-service resolution, external resolution and outbound HTTPS all
+continue to work — verified by resolving every service name from inside the
+Docker network, and by fetching over TLS from a container. The installer
+asserts the resolver is answering before it finishes, because a broken dnsmasq
+would leave containers with no DNS at all.
+
+dnsmasq listens on `172.17.0.1` only, so it is not reachable from the LAN.
 
 Worth knowing the stack also resolves **`jsr.io`** repeatedly — that is the
 edge-functions Deno runtime fetching its dependencies, not part of this script.

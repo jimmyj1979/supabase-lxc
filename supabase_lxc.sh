@@ -235,11 +235,39 @@ pct exec "$CTID" -- bash -c 'curl -fsSL https://get.docker.com | sh >/dev/null 2
 # records resolve internally, the IPv6 ones find nothing and fall through.
 # "." means no search domain. Services resolve each other by bare name through
 # Docker's embedded DNS, which needs no search list.
-info "Capping container log growth and stopping DNS search-domain leakage"
+# Removing the search domain alone still left bare single-label queries going
+# upstream: Docker's embedded resolver forwards any name it cannot answer, so
+# `auth`, `db` and `functions` reached the LAN resolver anyway. dnsmasq with
+# domain-needed answers plain names NXDOMAIN locally and never forwards them,
+# while still forwarding real hostnames. Bound to the docker0 bridge only, so
+# it is not reachable from the LAN.
+info "Installing a local resolver so service names never reach the LAN"
+UPSTREAM_DNS=$(pct exec "$CTID" -- sh -c "grep -m1 '^nameserver' /etc/resolv.conf | cut -d' ' -f2")
+[ -n "$UPSTREAM_DNS" ] || die "Could not determine the container's upstream nameserver."
+pct exec "$CTID" -- bash -c '
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get install -y -qq dnsmasq >/dev/null 2>&1
+'
+pct exec "$CTID" -- env _U="$UPSTREAM_DNS" bash -c 'cat > /etc/dnsmasq.d/docker.conf <<EOF
+# Resolver for Docker containers only, bound to the docker0 bridge.
+# domain-needed is the point: single-label names such as auth, rest or storage
+# are answered NXDOMAIN here instead of being forwarded to the LAN resolver.
+listen-address=172.17.0.1
+bind-dynamic
+domain-needed
+no-resolv
+server=$_U
+cache-size=1000
+EOF'
+pct exec "$CTID" -- systemctl enable dnsmasq >/dev/null 2>&1
+pct exec "$CTID" -- systemctl restart dnsmasq >/dev/null 2>&1
+
+info "Capping container log growth and pointing containers at the local resolver"
 pct exec "$CTID" -- bash -c 'mkdir -p /etc/docker && cat > /etc/docker/daemon.json <<EOF
 {
   "log-driver": "json-file",
   "log-opts": { "max-size": "10m", "max-file": "3" },
+  "dns": ["172.17.0.1"],
   "dns-search": ["."]
 }
 EOF'
@@ -310,6 +338,21 @@ UNCAPPED=$(pct exec "$CTID" -- sh -c '
     docker inspect "$c" --format "{{json .HostConfig.LogConfig}}" | grep -q max-size || n=$((n+1))
   done
   echo "$n"' 2>/dev/null || echo "?")
+# The resolver only helps if it is actually answering. A broken dnsmasq would
+# leave containers with no DNS at all, so check both halves: a plain name must
+# be refused locally, and a real hostname must still resolve.
+DNSOK=$(pct exec "$CTID" -- sh -c '
+  command -v dnsmasq >/dev/null 2>&1 || { echo missing; exit; }
+  systemctl is-active --quiet dnsmasq || { echo stopped; exit; }
+  if getent hosts deb.debian.org >/dev/null 2>&1; then echo ok; else echo noresolve; fi' 2>/dev/null || echo "?")
+case "$DNSOK" in
+  ok) ok "Local resolver is answering; service names will not reach the LAN." ;;
+  *)  warn "Local DNS resolver check returned '$DNSOK'."
+      warn "Containers may be resolving through the LAN resolver, which leaks"
+      warn "Supabase service names onto the network. Check:"
+      warn "  pct exec $CTID -- systemctl status dnsmasq" ;;
+esac
+
 if [ "$UNCAPPED" = "0" ]; then
   ok "Container log rotation is in force on every service."
 else
